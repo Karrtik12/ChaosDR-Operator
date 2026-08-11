@@ -1,8 +1,7 @@
 import kopf
 import time
 import requests
-import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from kubernetes import client, config
 from prometheus_client import start_http_server, Counter, Gauge
 
@@ -11,18 +10,21 @@ FAILOVER_EVENTS = Counter('dr_failover_events_total', 'Total number of automated
 PRIMARY_HEALTH_GAUGE = Gauge('dr_primary_health_status', '1 if Primary is healthy, 0 if degraded', ['policy'])
 RTO_GAUGE = Gauge('dr_last_rto_seconds', 'Last recorded Recovery Time Objective in seconds', ['policy'])
 
-# Configure Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Load K8s Config (In-cluster or Kubeconfig)
-try:
-    config.load_incluster_config()
-except config.ConfigException:
-    config.load_kube_config()
+@kopf.on.startup()
+def on_startup(logger, **kwargs):
+    """Initialize K8s config and Prometheus telemetry on operator startup."""
+    # Load K8s Config (In-cluster or Kubeconfig)
+    try:
+        config.load_incluster_config()
+        logger.info("Loaded in-cluster Kubernetes config.")
+    except config.ConfigException:
+        config.load_kube_config()
+        logger.info("Loaded local kubeconfig.")
 
-# Start Prometheus Telemetry Server on Port 8000
-start_http_server(8000)
-logging.info("Prometheus Telemetry Exporter initialized on port 8000.")
+    # Start Prometheus Telemetry Server on Port 8000
+    start_http_server(8000)
+    logger.info("Prometheus Telemetry Exporter initialized on port 8000.")
 
 
 # Helper Function: Execute Velero Restore CRD
@@ -87,7 +89,7 @@ def on_drpolicy_create(spec, name, namespace, logger, **kwargs):
     logger.info(f"New DRPolicy created: '{name}' in namespace '{namespace}'.")
     PRIMARY_HEALTH_GAUGE.labels(policy=name).set(1)
 
-    return {'phase': 'Active', 'lastHealthCheck': str(datetime.utcnow())}
+    return {'phase': 'Active', 'lastHealthCheck': str(datetime.now(timezone.utc))}
 
 
 @kopf.timer('resilience.io', 'v1', 'drpolicies', interval=10.0)
@@ -132,5 +134,5 @@ def monitor_primary_and_reconcile(spec, name, namespace, status, patch, logger, 
         RTO_GAUGE.labels(policy=name).set(rto_seconds)
 
         patch.status['phase'] = 'FailedOver'
-        patch.status['lastFailoverTime'] = datetime.utcnow().isoformat()
+        patch.status['lastFailoverTime'] = datetime.now(timezone.utc).isoformat()
         patch.status['lastRtoSeconds'] = rto_seconds
