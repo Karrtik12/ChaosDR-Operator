@@ -1,0 +1,11 @@
+apiVersion: resilience.io/v1
+kind: DRPolicy
+metadata:
+  name: ecommerce-dr-policy
+  namespace: default
+spec:
+  targetNamespace: "prod-e-commerce"
+  healthCheckEndpoint: "http://<PRIMARY_CLUSTER_NODE_IP>:<NODE_PORT>"
+  failureThresholdSeconds: 10
+  veleroBackupName: "e-commerce-golden-backup"
+  chaosEnabled: true
