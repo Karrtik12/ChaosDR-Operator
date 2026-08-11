@@ -30,17 +30,7 @@ for cmd in docker kubectl kind helm velero; do
 done
 info "All prerequisites found."
 
-# --- Detect host IP for MinIO (accessible from Kind containers) ---
-LOCAL_IP=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-if [ -z "$LOCAL_IP" ]; then
-    # Fallback: use host.docker.internal on macOS, or first non-loopback IP
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        LOCAL_IP="host.docker.internal"
-    else
-        LOCAL_IP=$(hostname -I | awk '{print $1}')
-    fi
-fi
-info "Using host IP for MinIO: $LOCAL_IP"
+# NOTE: MinIO IP is determined after connecting it to the Kind network (see Step 2).
 
 # =============================================================================
 # STEP 1: Create Dual Kind Clusters
@@ -103,6 +93,15 @@ docker exec minio-s3 mc alias set myminio http://localhost:9000 minioadmin minio
 docker exec minio-s3 mc mb --ignore-existing myminio/velero-backups 2>/dev/null || true
 info "MinIO bucket 'velero-backups' is ready."
 
+# Connect MinIO to the Kind Docker network so cluster nodes can reach it directly
+info "Connecting MinIO to Kind Docker network..."
+docker network connect kind minio-s3 2>/dev/null || warn "MinIO already on Kind network."
+MINIO_IP=$(docker inspect minio-s3 --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
+if [ -z "$MINIO_IP" ]; then
+    error "Failed to get MinIO IP on the Kind network."
+fi
+info "MinIO reachable from Kind clusters at: $MINIO_IP:9000"
+
 # =============================================================================
 # STEP 3: Install Velero on Both Clusters
 # =============================================================================
@@ -130,7 +129,7 @@ install_velero_on_cluster() {
         --bucket velero-backups \
         --secret-file "$CREDS_FILE" \
         --use-node-agent \
-        --backup-location-config region=minio,s3ForcePathStyle="true",s3Url="http://${LOCAL_IP}:9000"
+        --backup-location-config region=minio,s3ForcePathStyle="true",s3Url="http://${MINIO_IP}:9000"
 
     info "Waiting for Velero deployment to be ready on $context..."
     kubectl -n velero wait --for=condition=available deployment/velero --timeout=120s

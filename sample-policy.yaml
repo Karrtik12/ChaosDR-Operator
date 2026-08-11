@@ -5,7 +5,7 @@ metadata:
   namespace: default
 spec:
   targetNamespace: "prod-e-commerce"
-  healthCheckEndpoint: "http://<PRIMARY_CLUSTER_NODE_IP>:<NODE_PORT>"
+  healthCheckEndpoint: "http://172.18.0.5:31698"
   failureThresholdSeconds: 10
   veleroBackupName: "e-commerce-golden-backup"
   chaosEnabled: true
