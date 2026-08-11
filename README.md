@@ -300,9 +300,3 @@ docker run --rm \
 4. **Python 3.11 is required** — `kopf` 1.37.2 is incompatible with Python 3.14 due to changes in the `logging.Handler.lock` mechanism within thread pool executors. Python 3.11 works correctly.
 
 5. **MinIO must be on the Kind Docker network** — Kind clusters use an isolated Docker network. MinIO must be explicitly connected to the `kind` network for Velero's BackupStorageLocation to reach it.
-
----
-
-## License
-
-MIT
