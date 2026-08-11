@@ -1,6 +1,19 @@
 # Autonomous Multi-Cloud Chaos Resilience & Automated DR Controller
 
-An intelligent Kubernetes Operator built in **Python** that continuously validates system resilience through automated chaos experiments, monitors cluster health via synthetic probes, and orchestrates cross-cloud disaster recovery failover using **Velero** — targeting an **RTO under 2 minutes**.
+A production-grade Kubernetes Operator built in **Python** using the **kopf** framework that autonomously monitors cluster health, validates resilience through chaos experiments, and orchestrates cross-cloud disaster recovery failover using **Velero** — achieving a measured **RTO of 2.03 seconds** (target was under 2 minutes).
+
+---
+
+## What This Project Does
+
+Modern microservice architectures face unexpected infrastructure failures, region outages, and network degradation. Traditional DR relies on manual failover triggers or brittle shell scripts, leading to unacceptable Recovery Time Objectives (RTO > 30 minutes) and human error during high-stress outages.
+
+This operator solves that by:
+
+1. **Declaring DR policies as Kubernetes custom resources** — cluster admins define `DRPolicy` CRs specifying health endpoints, backup names, and failover parameters.
+2. **Continuously probing primary cluster health** — a `@kopf.timer` runs every 10 seconds, sending HTTP requests to the primary workload's health endpoint.
+3. **Automatically triggering cross-cloud failover** — when the primary is detected as down, the operator dynamically constructs a Velero `Restore` CR on the secondary cluster, waits for completion, and records the RTO metric.
+4. **Exporting real-time telemetry** — Prometheus metrics expose failover counts, health status, and RTO measurements for Grafana dashboards.
 
 ---
 
@@ -39,23 +52,14 @@ An intelligent Kubernetes Operator built in **Python** that continuously validat
 ## Technical Stack
 
 | Component | Technology | Purpose |
-| --- | --- | --- |
-| **Language** | Python 3.11+ | Core runtime for operator logic, HTTP probes, and automation |
-| **Operator Framework** | `kopf` | Declarative event handling, timers, and K8s reconciliation loops |
-| **K8s Client Library** | `kubernetes` SDK | Direct interaction with K8s API server for pods, deployments, CRDs |
-| **Disaster Recovery** | Velero | Cloud-native backup and restore via object storage (S3/Azure Blob) |
+|---|---|---|
+| **Language** | Python 3.11 | Core runtime for operator logic, HTTP probes, and automation |
+| **Operator Framework** | `kopf` 1.37.2 | Declarative event handling, timers, and K8s reconciliation loops |
+| **K8s Client Library** | `kubernetes` 30.1.0 | Direct interaction with K8s API server for pods, deployments, CRDs |
+| **Disaster Recovery** | Velero 1.8+ | Cloud-native backup and restore via S3-compatible object storage |
 | **Chaos Engineering** | Chaos Mesh / LitmusChaos | Injecting PodChaos, NetworkChaos, StressChaos via K8s CRDs |
-| **Telemetry & Metrics** | `prometheus_client` | Exporting RTO timing, failover status, and probe latencies |
-| **Local Infrastructure** | Kind / K3s / MinIO | Multi-cluster simulation on local dev environment |
-
----
-
-## Key Subsystems
-
-1. **Reconciliation Loop** (`@kopf.on.create` / `@kopf.on.update`) — Registers DRPolicy, initializes Prometheus metrics
-2. **Periodic Health Probe Loop** (`@kopf.timer`, 10s interval) — Synthetic HTTP/TCP checks against the primary cluster workload
-3. **Chaos Experiment Controller** — Applies `PodChaos`/`NetworkChaos` CRDs to test auto-healing
-4. **Automated Failover Orchestrator** — Finds latest Velero Backup, applies Restore CRD to secondary cluster, updates DNS/routes, publishes RTO metric
+| **Telemetry & Metrics** | `prometheus_client` 0.20.0 | Exporting RTO timing, failover status, and probe latencies |
+| **Local Infrastructure** | Kind + MinIO | Multi-cluster simulation on local dev environment |
 
 ---
 
@@ -63,11 +67,14 @@ An intelligent Kubernetes Operator built in **Python** that continuously validat
 
 ```
 .
-├── crd.yaml              # CustomResourceDefinition for DRPolicy
+├── crd.yaml              # CustomResourceDefinition for DRPolicy (resilience.io/v1)
 ├── operator.py           # Core Python operator logic (kopf handlers)
 ├── requirements.txt      # Python dependencies
 ├── Dockerfile            # Container image for the operator
 ├── sample-policy.yaml    # Example DRPolicy CR instance
+├── credentials-velero    # AWS-format credentials for MinIO/Velero
+├── setup-infra.sh        # Automated infrastructure bootstrap script
+├── .gitignore            # Git ignore rules
 └── README.md             # This file
 ```
 
@@ -75,29 +82,57 @@ An intelligent Kubernetes Operator built in **Python** that continuously validat
 
 ## Prerequisites
 
-Install the following tools:
+Install the following on macOS:
 
-- Docker Engine (v24.0+)
-- `kubectl`
-- `kind` (Kubernetes in Docker)
-- `helm` (v3+)
-- Python 3.11+ and `pip`
+```bash
+# Docker Desktop (must be running)
+brew install --cask docker
+
+# CLI tools
+brew install kubectl kind helm velero
+
+# Python 3.11 (required — kopf is incompatible with Python 3.14)
+brew install python@3.11
+```
 
 ---
 
-## Environment Setup
+## Setup
 
-### Step 1: Spin Up Dual Kind Clusters
+### Option A: Automated (Recommended)
+
+The `setup-infra.sh` script handles everything — Kind clusters, MinIO, Velero, sample workload, backup, and CRD:
 
 ```bash
-# Create Primary Cluster (simulating Azure/AWS Primary)
-kind create cluster --name primary-cluster
+# Create Python 3.11 venv and install dependencies
+/opt/homebrew/bin/python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
-# Create Secondary Cluster (simulating GCP/On-Prem Standby)
+# Bootstrap all infrastructure
+./setup-infra.sh
+```
+
+> **Note**: After `setup-infra.sh` completes, you'll need to get the primary app's NodePort and update `sample-policy.yaml`:
+> ```bash
+> kubectl config use-context kind-primary-cluster
+> kubectl get svc -n prod-e-commerce
+> # Update sample-policy.yaml healthCheckEndpoint with <NODE_IP>:<NODE_PORT>
+> ```
+
+### Option B: Manual Step-by-Step
+
+<details>
+<summary>Click to expand manual setup instructions</summary>
+
+#### 1. Create Dual Kind Clusters
+
+```bash
+kind create cluster --name primary-cluster
 kind create cluster --name secondary-cluster
 ```
 
-### Step 2: Set Up MinIO Storage (Shared Cloud Bucket Simulation)
+#### 2. Set Up MinIO Storage
 
 ```bash
 docker run -d --name minio-s3 \
@@ -107,22 +142,19 @@ docker run -d --name minio-s3 \
   minio/minio server /data --console-address ":9001"
 
 # Create bucket
-docker exec -it minio-s3 mc alias set myminio http://localhost:9000 minioadmin minioadmin
-docker exec -it minio-s3 mc mb myminio/velero-backups
+docker exec minio-s3 mc alias set myminio http://localhost:9000 minioadmin minioadmin
+docker exec minio-s3 mc mb myminio/velero-backups
+
+# Connect MinIO to Kind network (critical for cluster-to-MinIO connectivity)
+docker network connect kind minio-s3
+MINIO_IP=$(docker inspect minio-s3 --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
+echo "MinIO IP on Kind network: $MINIO_IP"
 ```
 
-### Step 3: Install Velero on Both Clusters
+#### 3. Install Velero on Both Clusters
 
-Create `credentials-velero` file:
-```
-[default]
-aws_access_key_id = minioadmin
-aws_secret_access_key = minioadmin
-```
-
-Install Velero on each cluster:
 ```bash
-# Primary Cluster
+# Primary
 kubectl config use-context kind-primary-cluster
 velero install \
     --provider aws \
@@ -130,9 +162,9 @@ velero install \
     --bucket velero-backups \
     --secret-file ./credentials-velero \
     --use-node-agent \
-    --backup-location-config region=minio,s3ForcePathStyle="true",s3Url=http://<YOUR_LOCAL_IP>:9000
+    --backup-location-config region=minio,s3ForcePathStyle="true",s3Url=http://${MINIO_IP}:9000
 
-# Secondary Cluster
+# Secondary
 kubectl config use-context kind-secondary-cluster
 velero install \
     --provider aws \
@@ -140,72 +172,81 @@ velero install \
     --bucket velero-backups \
     --secret-file ./credentials-velero \
     --use-node-agent \
-    --backup-location-config region=minio,s3ForcePathStyle="true",s3Url=http://<YOUR_LOCAL_IP>:9000
+    --backup-location-config region=minio,s3ForcePathStyle="true",s3Url=http://${MINIO_IP}:9000
 ```
 
----
-
-## Deployment & Validation
-
-### Step 1: Deploy CRD and Operator
-
-```bash
-kubectl config use-context kind-secondary-cluster
-
-# Apply CRD
-kubectl apply -f crd.yaml
-
-# Run the Python Operator locally
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-kopf run --all-namespaces operator.py
-```
-
-### Step 2: Deploy Sample Application in Primary Cluster
+#### 4. Deploy Sample App & Create Backup
 
 ```bash
 kubectl config use-context kind-primary-cluster
-
-# Deploy application
 kubectl create namespace prod-e-commerce
 kubectl create deployment web-app --image=nginx -n prod-e-commerce
 kubectl expose deployment web-app --port=80 --type=NodePort -n prod-e-commerce
-
-# Create initial Velero Backup
 velero backup create e-commerce-golden-backup --include-namespaces prod-e-commerce --wait
 ```
 
-### Step 3: Apply the DRPolicy Instance
-
-Update `sample-policy.yaml` with your primary cluster's NodeIP and NodePort, then:
+#### 5. Apply CRD
 
 ```bash
 kubectl config use-context kind-secondary-cluster
+kubectl apply -f crd.yaml
+```
+
+</details>
+
+---
+
+## Running the Operator
+
+```bash
+# 1. Switch to secondary cluster (DR controller host)
+kubectl config use-context kind-secondary-cluster
+
+# 2. Activate Python 3.11 venv
+source venv/bin/activate
+
+# 3. Start the operator
+kopf run --all-namespaces operator.py
+
+# 4. In another terminal, apply the DR policy
 kubectl apply -f sample-policy.yaml
 ```
 
-### Step 4: Simulate Region Outage
+The operator will begin probing the primary health endpoint every 10 seconds.
+
+### Simulating a Region Outage
 
 ```bash
 kubectl config use-context kind-primary-cluster
 kubectl delete namespace prod-e-commerce --now
 ```
 
-### Step 5: Observe Automated Failover
+### Expected Operator Output
 
-Watch operator logs for automated DR execution:
 ```
-2026-08-12 03:30:10 - WARNING - Health check probe failed for 'http://172.18.0.2:30080': ConnectionRefusedError
-2026-08-12 03:30:10 - ERROR - CRITICAL: Primary endpoint is down! Evaluating Failover...
-2026-08-12 03:30:10 - WARNING - Initiating Automated Multi-Cloud DR Restoration...
-2026-08-12 03:30:28 - INFO - Automated Disaster Recovery completed in 18.42 seconds. Phase: Completed
+[03:56:14] WARNING  Health check probe failed for 'http://172.18.0.5:31698': ConnectTimeoutError
+[03:56:14] ERROR    CRITICAL: Primary endpoint is down! Evaluating Failover...
+[03:56:14] WARNING  Initiating Automated Multi-Cloud DR Restoration...
+[03:56:14] INFO     Submitting Velero Restore manifest 'auto-restore-1786487174'...
+[03:56:16] INFO     Velero Restore Status: Completed
+[03:56:16] INFO     Automated Disaster Recovery completed in 2.03 seconds. Phase: Completed
+[03:56:29] INFO     System is already in 'FailedOver' state. Skipping action.
 ```
 
-Verify recovery in secondary cluster:
+### Verifying Recovery
+
 ```bash
 kubectl config use-context kind-secondary-cluster
 kubectl get pods -n prod-e-commerce
-# OUTPUT: web-app-7d58b9f787-x829q   1/1     Running   0          20s
+# NAME                       READY   STATUS    RESTARTS   AGE
+# web-app-785556bfbd-q57gf   1/1     Running   0          47s
+
+kubectl get drpolicy ecommerce-dr-policy -o jsonpath='{.status}' | python3 -m json.tool
+# {
+#     "lastFailoverTime": "2026-08-11T22:26:16.928458+00:00",
+#     "lastRtoSeconds": 2.03,
+#     "phase": "FailedOver"
+# }
 ```
 
 ---
@@ -215,7 +256,7 @@ kubectl get pods -n prod-e-commerce
 The operator exports metrics on port `8000`:
 
 | Metric | Type | Description |
-| --- | --- | --- |
+|---|---|---|
 | `dr_failover_events_total` | Counter | Total automated failovers executed |
 | `dr_primary_health_status` | Gauge | 1 = healthy, 0 = degraded |
 | `dr_last_rto_seconds` | Gauge | Last recorded RTO in seconds |
@@ -234,6 +275,31 @@ docker run --rm \
   -p 8000:8000 \
   chaosdr-operator:dev
 ```
+
+---
+
+## Findings
+
+### Performance
+
+| Metric | Value |
+|--------|-------|
+| **Measured RTO** | **2.03 seconds** |
+| **Target RTO** | < 2 minutes |
+| **Health check interval** | 10 seconds |
+| **Failover loop guard** | Correctly prevents re-triggering |
+
+### Key Observations
+
+1. **Velero restore is fast for small workloads** — A single-deployment namespace restored in ~2 seconds via the MinIO backend. Larger workloads with PVCs and multi-pod deployments will take longer.
+
+2. **The operator is stateless** — All state lives in the `DRPolicy` CR status subresource. The operator can crash and restart without losing failover context.
+
+3. **Health probe timeout matters** — The 3-second HTTP timeout plus the 10-second timer interval means worst-case detection time is ~13 seconds before failover begins.
+
+4. **Python 3.11 is required** — `kopf` 1.37.2 is incompatible with Python 3.14 due to changes in the `logging.Handler.lock` mechanism within thread pool executors. Python 3.11 works correctly.
+
+5. **MinIO must be on the Kind Docker network** — Kind clusters use an isolated Docker network. MinIO must be explicitly connected to the `kind` network for Velero's BackupStorageLocation to reach it.
 
 ---
 

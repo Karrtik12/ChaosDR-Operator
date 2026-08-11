@@ -13,3 +13,7 @@ build/
 
 # OS
 .DS_Store
+
+# Documentation / Logs
+helpbook.md
+
