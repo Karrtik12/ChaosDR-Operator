@@ -145,7 +145,7 @@ aws_secret_access_key = minioadmin
 [INFO]  All prerequisites found.
 [INFO]  Creating primary-cluster...
 ERROR: failed to create cluster: failed to get docker info: command "docker info" failed
-failed to connect to the docker API at unix:///Users/kartikayechaturvedi/.docker/run/docker.sock: no such file or directory
+failed to connect to the docker API at unix://~/.docker/run/docker.sock: no such file or directory
 ```
 
 **Root Cause**: Docker Desktop was installed but not started.
